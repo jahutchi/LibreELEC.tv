@@ -1,0 +1,13 @@
+diff --git a/addons/resource.language.en_gb/resources/strings.po b/addons/resource.language.en_gb/resources/strings.po
+index 9009023..d0d0b37 100644
+--- a/addons/resource.language.en_gb/resources/strings.po
++++ b/addons/resource.language.en_gb/resources/strings.po
+@@ -9710,7 +9710,7 @@ msgstr ""
+ 
+ #: xbmc/windows/GUIWindowSystemInfo.cpp
+ msgctxt "#19166"
+-msgid "PVR information"
++msgid "Freeview/Freesat info"
+ msgstr ""
+ 
+ #: system/settings/settings.xml

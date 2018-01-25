@@ -59,6 +59,10 @@ else
   LIBREELEC_BUILD="community"
 fi
 
+#JAH - alter the build name so I know which commit point I'm at
+GIT_ABBREV=$(git log -1 --pretty=format:%h)
+LIBREELEC_BUILD="jahutchi-$GIT_ABBREV"
+
 if [ -n "$CUSTOM_VERSION" ]; then
   LIBREELEC_VERSION="$CUSTOM_VERSION"
 fi

@@ -1,0 +1,122 @@
+From 7222bf4304a65a17dd4939a08a840a89837a25ce Mon Sep 17 00:00:00 2001
+From: jahutchi <jahutchinson99@googlemail.com>
+Date: Fri, 25 Jan 2019 10:41:22 +0000
+Subject: [PATCH] media: ts2020: dont poll without a signal lock
+
+This attempts to resolve an issue on my server, whereby the DVBSky S960
+device occassionally locks up with ETIMEDOUT (-110) errors, as per the
+example in the following debug capture:
+
+  [23224] m88ds3103 1-0068: lock=05 status=00
+  [23224] usb 1-2: dvb_frontend_swzigzag_update_delay:
+  [27211] ts2020 2-0060:
+  [27211] usb 1-2: dvb_usb_v2_generic_io: >>> 09 01 01 68 3f
+  [27211] usb 1-2: dvb_usb_v2_generic_io: <<< 08 6c
+  [27211] usb 1-2: dvb_usb_v2_generic_io: >>> 08 68 02 03 11
+  [27211] usb 1-2: dvb_usb_v2_generic_io: <<< 08
+  [27211] usb 1-2: dvb_usb_v2_generic_io: >>> 09 01 01 60 3d
+  [27211] usb 1-2: dvb_usb_v2_generic_io: <<< 08 6f
+  [27211] usb 1-2: dvb_usb_v2_generic_io: >>> 08 68 02 03 11
+  [27211] usb 1-2: dvb_usb_v2_generic_io: <<< 08
+  [27211] usb 1-2: dvb_usb_v2_generic_io: >>> 09 01 01 60 21
+  [27211] usb 1-2: dvb_usb_v2_generic_io: <<< 08 0f
+  [27211] usb 1-2: dvb_usb_v2_generic_io: >>> 08 68 02 03 11
+  [27211] usb 1-2: dvb_usb_v2_generic_io: <<< 08
+  [27211] usb 1-2: dvb_usb_v2_generic_io: >>> 09 01 01 60 66
+  [27211] usb 1-2: dvb_usb_v2_generic_io: <<< 08 24
+  [27211] ts2020 2-0060:
+  [27211] usb 1-2: dvb_usb_v2_generic_io: >>> 09 01 01 68 3f
+  usb 1-2: dvb_usb_v2: 2nd usb_bulk_msg() failed=-110
+  [27211] usb 1-2: dvb_usb_v2_generic_io: <<<
+  usb 1-2: failed=-110
+  [27211] ts2020 2-0060: failed=-110
+  [23224] usb 1-2: dvb_usb_v2_generic_io: >>> 09 01 01 68 0d
+  usb 1-2: dvb_usb_v2: usb_bulk_msg() failed=-110
+  usb 1-2: failed=-110
+  [23224] m88ds3103 1-0068: failed=-110
+  [23224] usb 1-2: dvb_frontend_swzigzag_update_delay:
+  [23224] usb 1-2: dvb_usb_v2_generic_io: >>> 09 01 01 68 0d
+  usb 1-2: dvb_usb_v2: usb_bulk_msg() failed=-110
+  usb 1-2: failed=-110
+
+Once the device gets into this state it can only be restored to normal
+operation via a full power cycle to cut off USB power to the device (a
+normal reboot does not suffice).
+
+I've suffered from this problem for ~3 years on various kernel versions.
+
+I find the issue difficult to reproduce and entirely random. Thus, I
+haven't managed to fully bottom out the underlying cause. Sometimes
+it can occur within a few hours, days, or even weeks.
+
+The underlying problem could even be a firmware issue, or even an issue
+specific to the USB ports and/or drivers on my server.
+
+What I have observed is that the problem occurs around the time of
+reading the 3f AGC (Auto-Gain Correction) register, and only when the
+device is Idle (i.e. does not have a signal lock).
+
+This patch acts as a workaround; preventing the ts2020 tuner driver from
+reading the signal strength registers unless the device has a signal
+lock; and only for drivers which use the m88ds3103_get_agc_pwm function
+to gather the AGC. This includes a subset of devices and their variants
+from the dvbsky usb-interface (s960 & s960c), and the cx23885-dvb
+pci-interface (s950, s950c, s952).
+
+This is harmless, since the signal strength readings are only useful
+when the device actually has a signal.
+
+This is a workaround which I do not intend to submit for upstream
+consideration unless I can find a more reliable set of reproduction
+steps, and can prove it's not specific to someting elsewhere in my
+setup.
+---
+ drivers/media/dvb-frontends/m88ds3103.c | 3 +++
+ drivers/media/dvb-frontends/ts2020.c    | 5 ++---
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/dvb-frontends/m88ds3103.c b/drivers/media/dvb-frontends/m88ds3103.c
+index 77fe3dc..a364a38 100644
+--- a/drivers/media/dvb-frontends/m88ds3103.c
++++ b/drivers/media/dvb-frontends/m88ds3103.c
+@@ -82,6 +82,9 @@ int m88ds3103_get_agc_pwm(struct dvb_frontend *fe, u8 *_agc_pwm)
+ 	unsigned tmp;
+ 	int ret;
+ 
++	if (!(dev->fe_status & FE_HAS_LOCK))
++		return -EAGAIN;
++
+ 	ret = regmap_read(dev->regmap, 0x3f, &tmp);
+ 	if (ret == 0)
+ 		*_agc_pwm = tmp;
+diff --git a/drivers/media/dvb-frontends/ts2020.c b/drivers/media/dvb-frontends/ts2020.c
+index e5cd2cd..fd8e32d 100644
+--- a/drivers/media/dvb-frontends/ts2020.c
++++ b/drivers/media/dvb-frontends/ts2020.c
+@@ -412,7 +412,7 @@ static int ts2020_get_tuner_gain(struct dvb_frontend *fe, __s64 *_gain)
+ 	if (priv->get_agc_pwm) {
+ 		ret = priv->get_agc_pwm(fe, &agc_pwm);
+ 		if (ret < 0)
+-			return ret;
++			return (ret == -EAGAIN) ? 0 : ret;
+ 
+ 		switch (priv->tuner) {
+ 		case TS2020_M88TS2020:
+@@ -441,13 +441,12 @@ static void ts2020_stat_work(struct work_struct *work)
+ 	struct dtv_frontend_properties *c = &priv->fe->dtv_property_cache;
+ 	int ret;
+ 
+-	dev_dbg(&client->dev, "\n");
+-
+ 	ret = ts2020_get_tuner_gain(priv->fe, &c->strength.stat[0].svalue);
+ 	if (ret < 0)
+ 		goto err;
+ 
+ 	c->strength.stat[0].scale = FE_SCALE_DECIBEL;
++	dev_dbg(&client->dev, "signal: %lld\n", c->strength.stat[0].svalue);
+ 
+ 	if (!priv->dont_poll)
+ 		schedule_delayed_work(&priv->stat_work, msecs_to_jiffies(2000));
+-- 
+2.7.4
+
